@@ -14,6 +14,8 @@ import unicodedata
 from dotenv import load_dotenv
 import streamlit as st
 from docx import Document
+import pandas as pd
+from langchain_core.documents import Document as LangChainDocument
 from langchain_community.document_loaders import WebBaseLoader
 from langchain.text_splitter import CharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings
@@ -207,6 +209,9 @@ def file_load(path, docs_all):
         path: ファイルパス
         docs_all: データソースを格納する用のリスト
     """
+    # logger取得（モジュールレベルから）
+    logger = logging.getLogger(ct.LOGGER_NAME)
+    
     # ファイルの拡張子を取得
     file_extension = os.path.splitext(path)[1]
     # ファイル名（拡張子を含む）を取得
@@ -214,10 +219,76 @@ def file_load(path, docs_all):
 
     # 想定していたファイル形式の場合のみ読み込む
     if file_extension in ct.SUPPORTED_EXTENSIONS:
-        # ファイルの拡張子に合ったdata loaderを使ってデータ読み込み
-        loader = ct.SUPPORTED_EXTENSIONS[file_extension](path)
-        docs = loader.load()
-        docs_all.extend(docs)
+        
+        # CSV特殊処理：部署ごとに統合
+        if file_extension == ".csv":
+            try:
+                df = pd.read_csv(path, encoding="utf-8")
+
+                if "部署" in df.columns:
+                    # NaN行を事前除外
+                    df_clean = df[df["部署"].notna()].copy()
+                    
+                    # 正規化した部署名列を作る（空白除去）
+                    df_clean["_dept_norm"] = df_clean["部署"].astype(str).str.strip()
+
+                    for dept in df_clean["_dept_norm"].unique():
+                        if not dept:  # 空文字列スキップ
+                            continue
+
+                        dept_data = df_clean[df_clean["_dept_norm"] == dept].drop(columns=["_dept_norm"])
+
+                        dept_text = f"""【{dept}の従業員一覧】
+以下は{dept}に所属する全従業員情報です。
+
+{dept_data.to_string(index=False)}
+
+合計: {len(dept_data)}名
+"""
+                        doc = LangChainDocument(
+                            page_content=dept_text,
+                            metadata={"source": path, "department": dept, "type": "employee_database"},
+                        )
+                        docs_all.append(doc)
+
+                else:
+                    # 部署列がない場合、CSV全体を1ドキュメントに
+                    csv_text = f"""【CSVデータ: {file_name}】
+
+{df.to_string(index=False)}
+"""
+                    doc = LangChainDocument(
+                        page_content=csv_text,
+                        metadata={"source": path, "type": "csv_data"},
+                    )
+                    docs_all.append(doc)
+
+            except Exception as e:
+                # エラー時もCSV全体を統合して読み込む
+                logger.warning(f"CSV部署別処理失敗 ({path}): {e}. CSV全体を1ドキュメントとして読み込み")
+                try:
+                    df_fallback = pd.read_csv(path, encoding="utf-8")
+                    csv_text = f"""【CSVデータ: {file_name}】
+
+{df_fallback.to_string(index=False)}
+"""
+                    doc = LangChainDocument(
+                        page_content=csv_text,
+                        metadata={"source": path, "type": "csv_fallback"},
+                    )
+                    docs_all.append(doc)
+                except Exception as e2:
+                    # 最終手段: 行単位分割loader
+                    logger.error(f"CSV読み込み完全失敗 ({path}): {e2}. 行単位loaderを使用")
+                    loader = ct.SUPPORTED_EXTENSIONS[file_extension](path)
+                    docs = loader.load()
+                    docs_all.extend(docs)
+
+        else:
+            # CSV以外（PDF, DOCX, TXT）は通常処理
+            loader = ct.SUPPORTED_EXTENSIONS[file_extension](path)
+            docs = loader.load()
+            docs_all.extend(docs)
 
 
 def adjust_string(s):
