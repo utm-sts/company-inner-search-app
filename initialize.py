@@ -130,8 +130,12 @@ def initialize_retriever():
         separator="\n"
     )
 
-    # チャンク分割を実施
-    splitted_docs = text_splitter.split_documents(docs_all)
+    # CSVの完全データ（employee_database）は分割せず、それ以外を分割
+    csv_full_docs = [doc for doc in docs_all if doc.metadata.get("type") == "employee_database"]
+    other_docs = [doc for doc in docs_all if doc.metadata.get("type") != "employee_database"]
+
+    # 完全データはそのまま、それ以外（要約データを含む）は分割
+    splitted_docs = csv_full_docs + text_splitter.split_documents(other_docs)
 
     # ベクターストアの作成
     db = Chroma.from_documents(splitted_docs, embedding=embeddings)
@@ -238,6 +242,7 @@ def file_load(path, docs_all):
 
                         dept_data = df_clean[df_clean["_dept_norm"] == dept].drop(columns=["_dept_norm"])
 
+                        # 完全なデータ（分割しない用）
                         dept_text = f"""【{dept}の従業員一覧】
 以下は{dept}に所属する全従業員情報です。
 
@@ -250,6 +255,19 @@ def file_load(path, docs_all):
                             metadata={"source": path, "department": dept, "type": "employee_database"},
                         )
                         docs_all.append(doc)
+                        
+                        # 検索用の要約データ（分割される用）
+                        summary_text = f"""【{dept}の従業員情報】
+部署名: {dept}
+従業員数: {len(dept_data)}名
+この部署に関する詳細な従業員情報（社員ID、氏名、性別、年齢、メールアドレス、従業員区分、入社日、役職、スキルセット、保有資格、学歴など）が含まれています。
+従業員一覧: {', '.join(dept_data['氏名（フルネーム）'].astype(str).tolist()) if '氏名（フルネーム）' in dept_data.columns else '情報あり'}
+"""
+                        summary_doc = LangChainDocument(
+                            page_content=summary_text,
+                            metadata={"source": path, "department": dept, "type": "employee_summary"},
+                        )
+                        docs_all.append(summary_doc)
 
                 else:
                     # 部署列がない場合、CSV全体を1ドキュメントに
